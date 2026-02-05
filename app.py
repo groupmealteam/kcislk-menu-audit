@@ -1,76 +1,62 @@
 import streamlit as st
+import pandas as pd
 import re
 
-# 系統標題
-st.set_page_config(page_title="康橋校內菜單審核系統", layout="wide")
-st.title("🍱 康橋校內菜單自動審核系統")
-st.caption("版本：2026 最終合約整合版 (含新北食品、暖禾輕食)")
+st.set_page_config(page_title="康橋菜單審核系統-Excel版", layout="wide")
+st.title("🍱 康橋校內菜單自動審核系統 (Excel 支援)")
 
-# 側邊欄設定
-with st.sidebar:
-    st.header("⚙️ 審核設定")
-    school_level = st.selectbox("學部選擇", ["小學部", "中學部"])
-    target_date = st.date_input("菜單週別起始日")
-
-# 核心邏輯區：根據關鍵字切換合約模式
-def audit_logic(text):
+# --- 核心審核邏輯 ---
+def audit_logic(df_text, school_level):
+    text = str(df_text) # 將表格內容轉為文字進行關鍵字掃描
     results = {"mode": "通用", "errors": [], "warnings": [], "success": []}
     
-    # 偵測模式
-    if "小學菜單" in text or "幼兒餐" in text:
-        results["mode"] = "新北食品-小學部"
-    elif "美食街" in text:
-        results["mode"] = "新北食品-美食街"
-    elif "輕食菜單" in text:
-        results["mode"] = "暖禾輕食"
+    # 模式偵測
+    if "小學菜單" in text or "幼兒餐" in text: results["mode"] = "新北食品-小學部"
+    elif "美食街" in text: results["mode"] = "新北食品-美食街"
+    elif "輕食菜單" in text: results["mode"] = "暖禾輕食"
 
-    # --- 通用原則 (△ 與 ◎ 限制) ---
+    # 1. 頻次檢查 (△ 與 ◎)
     proc_count = text.count("△")
     fried_count = text.count("◎")
     if proc_count > 1: results["errors"].append(f"❌ 違規：加工品(△)本週 {proc_count} 次 (限1次)")
     if fried_count > 1: results["errors"].append(f"❌ 違規：油炸(◎)本週 {fried_count} 次 (限1次)")
 
-    # --- 新北食品：美食街增補協議邏輯 ---
-    if results["mode"] == "新北食品-美食街":
-        if "100g" not in text and "生重" not in text:
-            results["warnings"].append("⚠️ 提醒：美食街主菜生重需達 100g-150g，請確認標註。")
-        if text.count("全肉") < 3:
-            results["warnings"].append("⚠️ 提醒：根據協議，每週應有至少 3 天全肉主菜(肉含量95%)。")
-    
-    # --- 高級魚類檢查 ---
-    high_fish_jr = ["鯛魚", "鮪魚", "鬼頭刀", "鮭魚", "扁鱈", "海鸚哥魚"]
-    high_fish_elem = ["鮪魚", "鬼頭刀", "旗魚"]
-    check_list = high_fish_jr if school_level == "中學部" else high_fish_elem
-    
-    if not any(f in text for f in check_list):
-        results["errors"].append(f"❌ 缺項：本週未偵測到{school_level}定義之高級魚類。")
-    else:
-        results["success"].append("✅ 已配置高級魚類。")
-
-    # --- 禁忌檢查 ---
+    # 2. 禁忌檢查 (週一二四晚不辣)
     if any(d in text for d in ["週一", "週二", "週四"]) and "辣" in text:
         results["errors"].append("❌ 禁忌：週一、二、四晚餐禁止供應辛辣菜餚。")
 
+    # 3. 高級魚類檢查
+    fish_list = ["鮪魚", "鬼頭刀", "旗魚", "鮭魚", "扁鱈"] # 綜合清單
+    if not any(f in text for f in fish_list):
+        results["errors"].append(f"❌ 缺項：本週未偵測到高級魚類。")
+    
     return results
 
-# 網頁輸入介面
-st.info("請貼上菜單內容（需包含關鍵字如：小學菜單、美食街、輕食菜單）")
-menu_input = st.text_area("在此輸入菜單文字...", height=300, placeholder="例如：\\n美食街菜單\\n週一：◎炸雞腿(100g)...")
+# --- 網頁介面 ---
+st.info("💡 您現在可以直接上傳 Excel 檔案，或是在下方貼上文字。")
 
-if st.button("🚀 開始自動審核"):
-    if menu_input:
-        mode, res = audit_logic(menu_input)["mode"], audit_logic(menu_input)
-        st.subheader(f"🔍 偵測模式：{mode}")
+# 檔案上傳器
+uploaded_file = st.file_uploader("選擇您的菜單 Excel 檔案", type=["xlsx", "xls"])
+
+if uploaded_file:
+    try:
+        # 讀取 Excel
+        df = pd.read_excel(uploaded_file)
+        st.write("📂 檔案預覽：")
+        st.dataframe(df.head(10)) # 顯示前10列參考
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if res["errors"]:
-                for e in res["errors"]: st.error(e)
-            else:
-                st.success("✅ 結構與頻次檢查通過！")
+        # 將整份表格轉成文字來審核
+        all_text = df.to_string()
         
-        with col2:
+        if st.button("🚀 執行 Excel 自動審核"):
+            res = audit_logic(all_text, "中學部")
+            st.divider()
+            st.subheader(f"🔍 偵測模式：{res['mode']}")
+            for e in res["errors"]: st.error(e)
             for w in res["warnings"]: st.warning(w)
-            for s in res["success"]: st.write(s)
-    else:
-        st.warning("請先貼上內容再執行。")
+            if not res["errors"]: st.success("✅ 合約基本規範檢查通過！")
+    except Exception as e:
+        st.error(f"檔案讀取失敗，請確認格式。錯誤訊息: {e}")
+
+st.divider()
+st.caption("備註：系統會掃描 Excel 內所有文字。請確保「△」、「◎」等符號有正確標註在格子裡。")
