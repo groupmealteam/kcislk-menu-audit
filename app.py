@@ -1,69 +1,53 @@
 import streamlit as st
 import pandas as pd
-import io
 
-# 網頁外觀優化
-st.set_page_config(page_title="康橋菜單極速審核", page_icon="🍱", layout="centered")
-st.title("🚀 康橋菜單自動審核 (極速版)")
-st.markdown("---")
+st.set_page_config(page_title="康橋菜單審核-穩定版", layout="wide")
+st.title("🍱 康橋菜單自動審核 (穩定版)")
 
-# 核心審核引擎
-def audit_engine(content):
-    res = {"err": [], "warn": [], "ok": []}
-    text = str(content)
+# --- 核心邏輯 ---
+def audit(text):
+    res = {"err": [], "warn": []}
+    # 1. 檢查 △ 和 ◎
+    p = text.count("△")
+    f = text.count("◎")
+    if p > 1: res["err"].append(f"❌ 加工品(△)本週 {p} 次 (限1次)")
+    if f > 1: res["err"].append(f"❌ 油炸類(◎)本週 {f} 次 (限1次)")
     
-    # 模式辨識
-    if "小學菜單" in text: mode = "新北-小學"
-    elif "美食街" in text: mode = "新北-美食街"
-    elif "輕食菜單" in text: mode = "暖禾-輕食"
-    else: mode = "通用偵測"
-
-    # 1. 符號頻次 (△, ◎)
-    p_count = text.count("△")
-    f_count = text.count("◎")
-    if p_count > 1: res["err"].append(f"❌ 加工品(△)本週 {p_count} 次 (限1次)")
-    if f_count > 1: res["err"].append(f"❌ 油炸類(◎)本週 {f_count} 次 (限1次)")
-
-    # 2. 晚餐禁辣 (週一二四)
+    # 2. 禁辣檢查
     for d in ["週一", "週二", "週四"]:
         if d in text and "辣" in text:
-            res["err"].append(f"❌ {d} 晚餐禁止辛辣菜餚")
-
+            res["err"].append(f"❌ {d} 晚餐依約禁止辛辣菜餚")
+            
     # 3. 高級魚類
     fishes = ["鮪魚", "鬼頭刀", "旗魚", "鮭魚", "扁鱈", "鯛魚"]
-    if not any(f in text for f in fishes):
-        res["err"].append("❌ 未偵測到高級魚類")
-    
-    return mode, res
+    if not any(fish in text for fish in fishes):
+        res["err"].append("❌ 缺項：未偵測到高級魚類")
+    return res
 
-# 上傳介面
-uploaded_file = st.file_uploader("請上傳 Excel 檔案", type=["xlsx"])
+# --- 介面 ---
+tab1, tab2 = st.tabs(["📁 上傳 Excel", "✍️ 直接貼上文字"])
 
-if uploaded_file:
-    with st.spinner('系統正在極速掃描中...'):
+with tab1:
+    up = st.file_uploader("請選擇 Excel 檔案", type=["xlsx"])
+    if up:
         try:
-            # 只讀取文字，不讀取樣式，速度最快
-            df_list = pd.read_excel(uploaded_file, sheet_name=None, dtype=str)
-            all_txt = ""
-            for name, df in df_list.items():
-                all_txt += df.to_string()
+            # 強制轉成字串讀取
+            df_dict = pd.read_excel(up, sheet_name=None, dtype=str)
+            all_t = ""
+            for sn in df_dict:
+                all_t += df_dict[sn].to_string()
             
-            mode, report = audit_engine(all_txt)
-            
-            st.success(f"✅ 掃描完成！目前模式：{mode}")
-            
-            # 顯示結果
-            if report["err"]:
-                for e in report["err"]: st.error(e)
-            else:
-                st.balloons()
-                st.success("🎉 完美！符合合約規範。")
-                
-            if report["warn"]:
-                for w in report["warn"]: st.warning(w)
-                
-        except Exception as e:
-            st.error(f"讀取失敗，請確認檔案是否正確。錯誤訊息: {e}")
+            if st.button("執行 Excel 審核"):
+                r = audit(all_t)
+                if not r["err"]: st.success("✅ 合規")
+                for e in r["err"]: st.error(e)
+        except Exception as ex:
+            st.error(f"Excel 讀取失敗，建議改用『貼上文字』功能。錯誤：{ex}")
 
-st.markdown("---")
-st.caption("提示：若上傳後沒反應，請重新整理網頁再試一次。")
+with tab2:
+    txt_input = st.text_area("請直接從 Excel 複製內容貼到這裡", height=300)
+    if st.button("執行文字審核"):
+        if txt_input:
+            r = audit(txt_input)
+            if not r["err"]: st.success("✅ 合規")
+            for e in r["err"]: st.error(e)
