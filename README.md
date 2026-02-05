@@ -1,1 +1,4 @@
-# kcislk-menu-audit
+requirements.txt
+pandas
+openpyxl
+streamlit
