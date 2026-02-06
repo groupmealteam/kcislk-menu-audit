@@ -89,4 +89,4 @@ if uploaded_file:
         )
         st.table(pd.DataFrame(results))
     else:
-        st.success("🎉
+        st.success("🎉 經系統檢測，未發現明顯違規。")
