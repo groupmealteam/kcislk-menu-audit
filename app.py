@@ -1,128 +1,111 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="康橋菜單精準審核系統", layout="wide")
+st.set_page_config(page_title="康橋菜單合約精準審核系統", layout="wide")
 
-# --- 從 PDF 合約提取的精準規則資料庫 ---
+# --- 合約資料庫設定 ---
 RULES = {
     "新北食品": {
         "keywords": ["小學菜單", "幼兒餐菜單", "美食街素食菜單", "美食街"],
         "fish_specs": ["現撈小卷", "無刺白帶魚", "鬼頭刀", "白蝦", "淡菜", "水鯊", "帶皮鯰魚"],
         "fried_limit": 1,
         "spicy_days": ["週一", "週二", "週四"],
-        "contracts": "增補協議要求：小卷 80-100g、白帶魚 120-150g"
+        "desc": "團膳合約規範 (含增補協議克重要求)"
     },
     "暖禾輕食": {
-        "keywords": ["輕食菜單"],
+        "keywords": ["輕食", "菜單"],
         "fish_specs": ["鮭魚", "鯖魚", "鱸魚", "蝦仁", "小卷"],
         "fried_limit": 1,
         "spicy_days": ["週一", "週二", "週四"],
-        "contracts": "輕食合約要求：符合校園飲品點心規範，限油炸。"
+        "desc": "輕食供應合約規範 (符合校園飲品點心準則)"
     }
 }
 
-def get_rule_by_sheet(sheet_name):
-    for vendor, r in RULES.items():
-        if any(key in sheet_name for key in r["keywords"]):
-            return vendor, r
-    return "未知分頁", None
-
 def audit_logic(df, rule):
     df = df.fillna("").astype(str)
-    results = {"errors": [], "passed_items": []}
+    violations = [] 
     
-    # 1. 尋找日期列 (基準列)
-    day_row_idx = next((i for i, r in df.iterrows() if any("週" in cell for cell in r)), None)
+    # 1. 定位日期列
+    day_row_idx = next((i for i, r in df.iterrows() if any("週" in str(cell) for cell in r)), None)
     if day_row_idx is None:
-        results["errors"].append({"type": "格式錯誤", "msg": "找不到日期列（週一至週五）"})
-        return results
+        return None, "❌ 找不到日期列（週一至週五），請檢查 Excel 格式。"
 
-    # 2. 垂直掃描每一天 (Column)
     header_cells = df.iloc[day_row_idx].tolist()
+    
     for col_idx, cell_value in enumerate(header_cells):
-        day_name = cell_value.strip()
+        day_name = str(cell_value).strip()
         if any(d in day_name for d in ["週一", "週二", "週三", "週四", "週五"]):
-            
-            # 獲取該天整欄所有餐點 (排除日期列)
             column_data = df.iloc[:, col_idx].tolist()
             
-            # --- 逐一檢查每一道菜 (Row) ---
+            # --- 逐一檢查每一道菜 ---
             for row_idx, dish_name in enumerate(column_data):
                 dish_clean = dish_name.strip().replace("\n", " ")
                 if not dish_clean or row_idx == day_row_idx:
                     continue
 
-                # ⚠️ 判讀 A：禁辣違規 (精確定位到菜名)
+                # A. 禁辣檢查
                 if any(d in day_name for d in rule["spicy_days"]):
                     if "🌶️" in dish_clean or "●" in dish_clean:
-                        results["errors"].append({
-                            "day": day_name,
-                            "dish": dish_clean,
-                            "reason": f"合約禁辣日（{day_name}）不可提供辣味餐點"
+                        violations.append({
+                            "日期": day_name,
+                            "異常餐點名稱": dish_clean,
+                            "違規原因": "🚫 禁辣日出現辣味標示"
                         })
 
-                # ✅ 判讀 B：合約高級魚偵測
-                found_fish = [f for f in rule["fish_specs"] if f in dish_clean]
-                if found_fish:
-                    results["passed_items"].append({
-                        "day": day_name,
-                        "dish": dish_clean,
-                        "match": ", ".join(found_fish)
+                # B. 油炸符號檢查 (單一菜色檢查)
+                if dish_clean.count("◎") > rule["fried_limit"]:
+                    violations.append({
+                        "日期": day_name,
+                        "異常餐點名稱": dish_clean,
+                        "違規原因": f"🍟 油炸次數超過上限"
                     })
 
-            # ⚠️ 判讀 C：油炸次數統計 (全天彙整)
-            col_text = "".join(column_data)
-            f_count = col_text.count("◎")
-            if f_count > rule["fried_limit"]:
-                results["errors"].append({
-                    "day": day_name,
-                    "dish": "當日整欄統計",
-                    "reason": f"油炸次數 ({f_count}) 超過合約上限 ({rule['fried_limit']} 次)"
-                })
+    return violations, "OK"
 
-    return results
+# --- 網頁主程式 ---
+st.title("🍱 康橋菜單合約異常精準定位系統")
 
-# --- 網頁介面 ---
-st.title("🍱 康橋菜單合約精準審核系統")
-st.info("系統將根據分頁名稱自動識別廠商：\n- **新北食品**：小學、幼兒餐、美食街\n- **暖禾**：輕食菜單")
-
-up = st.file_uploader("👉 請上傳 Excel 菜單", type=["xlsx"])
+up = st.file_uploader("👉 請上傳您的 Excel 菜單", type=["xlsx"])
 
 if up:
+    file_name = up.name
+    st.info(f"📂 偵測到檔案名稱：`{file_name}`")
+    
+    # --- 關鍵識別邏輯 ---
+    # 優先判斷檔名是否有「輕食」
+    is_light_meal_file = "輕食" in file_name
+    
     try:
         excel = pd.ExcelFile(up)
         for sheet_name in excel.sheet_names:
-            df = pd.read_excel(up, sheet_name=sheet_name, header=None)
-            vendor, r = get_rule_by_sheet(sheet_name)
-
-            st.subheader(f"📊 分頁：{sheet_name} (廠商：{vendor})")
-            
-            if r:
-                res = audit_logic(df, r)
-                
-                # 🔴 顯示異常報警
-                if res["errors"]:
-                    st.error(f"⚠️ 偵測到 {len(res['errors'])} 項合約違規：")
-                    # 建立表格顯示異常，讓用戶一眼看清
-                    err_df = pd.DataFrame(res["errors"])
-                    st.table(err_df[["day", "dish", "reason"]].rename(
-                        columns={"day": "日期", "dish": "異常餐點內容", "reason": "違反規則"}
-                    ))
-                else:
-                    st.success(f"🎉 {sheet_name} 分頁初步審核完全符合合約規範！")
-
-                # 🔵 顯示合格明細
-                with st.expander("🔍 查看合格食材與統計"):
-                    if res["passed_items"]:
-                        st.write("已偵測到下列合約指定食材：")
-                        st.table(pd.DataFrame(res["passed_items"]).rename(
-                            columns={"day": "日期", "dish": "餐點名稱", "match": "匹配關鍵字"}
-                        ))
-                    else:
-                        st.write("未在菜名中偵測到合約指定魚類。")
+            # 判斷廠商
+            if is_light_meal_file:
+                vendor = "暖禾輕食"
             else:
-                st.warning("無法辨識此分頁名稱，請確認是否包含關鍵字（如：小學菜單、輕食菜單）。")
-            st.divider()
+                # 若檔名沒寫，則根據分頁關鍵字判斷
+                if any(k in sheet_name for k in RULES["暖禾輕食"]["keywords"]):
+                    vendor = "暖禾輕食"
+                elif any(k in sheet_name for k in RULES["新北食品"]["keywords"]):
+                    vendor = "新北食品"
+                else:
+                    vendor = "新北食品" # 預設
+
+            rule = RULES[vendor]
+            df = pd.read_excel(up, sheet_name=sheet_name, header=None)
             
+            st.subheader(f"📊 審核分頁：{sheet_name} (廠商規則：{vendor})")
+            
+            violations, msg = audit_logic(df, rule)
+            
+            if violations:
+                st.error(f"🚩 發現 {len(violations)} 項異常！請要求廠商修改：")
+                # 這裡就是你要的：清楚告訴你哪一天、哪道菜、為什麼異常
+                st.table(pd.DataFrame(violations))
+            elif violations is None:
+                st.warning(msg)
+            else:
+                st.success("🎉 完美！本頁所有餐點均符合合約規範。")
+            st.divider()
+
     except Exception as e:
-        st.error(f"判讀過程發生錯誤：{e}")
+        st.error(f"系統故障：{e}")
