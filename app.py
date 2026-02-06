@@ -1,75 +1,76 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="康橋菜單判讀專家", layout="wide")
+st.set_page_config(page_title="康橋菜單合約精準審核系統", layout="wide")
 
-with st.sidebar:
-    st.header("⚙️ 審核條件自定義")
-    target_spicy_days = st.multiselect("哪些日子要『禁辣』？", 
-                                       ["週一", "週二", "週三", "週四", "週五"], 
-                                       default=["週一", "週二", "週四"])
-    fish_list = st.text_input("高級魚類關鍵字 (用逗號隔開)", "鬼頭刀,白帶魚,小卷,鮭魚,扁鱈,鮪魚").split(",")
-    fried_limit = st.number_input("每週油炸(◎)上限次數", value=1)
+# --- 合約資料庫設定 ---
+RULES = {
+    "新北食品": {
+        "keywords": ["小學菜單", "幼兒餐菜單", "美食街素食菜單", "美食街"],
+        "fish_specs": ["現撈小卷", "無刺白帶魚", "鬼頭刀", "白蝦", "淡菜", "水鯊", "鯰魚"],
+        "fried_limit": 1,
+        "spicy_days": ["週一", "週二", "週四"]
+    },
+    "暖禾輕食": {
+        "keywords": ["輕食菜單"],
+        "fish_specs": ["鮭魚", "鯖魚", "鱸魚", "蝦仁", "小卷"],
+        "fried_limit": 1,
+        "spicy_days": ["週一", "週二", "週四"]
+    }
+}
 
-st.title("🍱 康橋校內菜單自動審核系統")
+st.sidebar.header("🏢 廠商模式選擇")
+mode = st.sidebar.selectbox("請手動選擇或讓系統自動偵測", ["自動偵測", "新北食品", "暖禾輕食"])
 
-def check_menu_logic(df):
+def get_rule_by_sheet(sheet_name):
+    for vendor, r in RULES.items():
+        if any(key in sheet_name for key in r["keywords"]):
+            return vendor, r
+    return "未知", None
+
+def audit_logic(df, rule):
     df = df.fillna("").astype(str)
-    report = {"err": [], "ok": []}
+    report = {"err": [], "info": []}
     
-    # 找「週」所在列
-    day_row = None
-    for idx, row in df.iterrows():
-        if any("週" in cell for cell in row):
-            day_row = idx
-            break
-            
-    if day_row is None:
-        return {"err": ["❌ 判讀失敗：找不到日期標記列。"], "ok": ["無法判讀內容"]}
+    # 尋找日期列
+    day_row = next((i for i, r in df.iterrows() if any("週" in cell for cell in r)), None)
+    if day_row is None: return {"err": ["❌ 找不到日期列"], "info": []}
 
-    # 按欄位掃描
     for col_idx in range(len(df.columns)):
         day_name = df.iloc[day_row, col_idx].strip()
         if any(d in day_name for d in ["週一", "週二", "週三", "週四", "週五"]):
-            col_content = "".join(df.iloc[:, col_idx])
+            content = "".join(df.iloc[:, col_idx])
             
-            # 1. 辣味檢查
-            has_spicy = "🌶️" in col_content or "●" in col_content
-            if any(d in day_name for d in target_spicy_days) and has_spicy:
-                report["err"].append(f"❌ 違規：{day_name} 偵測到辣味標示 (●/🌶️)。")
+            # 1. 禁辣檢查 (週一、二、四)
+            if any(d in day_name for d in rule["spicy_days"]) and ("🌶️" in content or "●" in content):
+                report["err"].append(f"❌ {day_name}：合約禁辣日出現辣味標示")
             
-            # 2. 魚類檢查 (放入詳細結果)
-            found_fish = [f.strip() for f in fish_list if f.strip() in col_content and f.strip() != ""]
-            fish_msg = f"🐟 {day_name} 魚類：{', '.join(found_fish) if found_fish else '未偵測到'}"
+            # 2. 魚類規格檢查
+            found = [f for f in rule["fish_specs"] if f in content]
+            if found:
+                report["info"].append(f"✅ {day_name} 合約魚類：{', '.join(found)}")
             
-            # 3. 符號統計 (放入詳細結果)
-            fried_cnt = col_content.count("◎")
-            proc_cnt = col_content.count("△")
-            stat_msg = f" (炸:{fried_cnt} | 加工:{proc_cnt})"
-            
-            report["ok"].append(fish_msg + stat_msg)
+            # 3. 油炸/加工統計
+            f_cnt = content.count("◎")
+            p_cnt = content.count("△")
+            report["info"].append(f"📊 {day_name}：油炸 {f_cnt} | 加工 {p_cnt}")
 
     return report
 
-# --- 檔案上傳 ---
-up = st.file_uploader("👉 請上傳您的 Excel 菜單", type=["xlsx"])
+st.title("🍱 康橋菜單合約自動化審核")
+up = st.file_uploader("請上傳您的 Excel 菜單", type=["xlsx"])
 
 if up:
-    try:
-        sheets = pd.read_excel(up, sheet_name=None, header=None)
-        for name, df in sheets.items():
-            st.subheader(f"📊 分頁判讀：{name}")
-            res = check_menu_logic(df)
-            
-            if res["err"]:
-                for e in res["err"]: st.error(e)
-            else:
-                st.success(f"🎉 分頁 【{name}】 審核通過！")
-            
-            # 讓詳細結果永遠有東西看
-            with st.expander("🔍 查看詳細日判讀明細"):
-                for info in res["ok"]:
-                    st.write(info)
-            st.divider()
-    except Exception as e:
-        st.error(f"讀取失敗：{e}")
+    sheets = pd.read_excel(up, sheet_name=None, header=None)
+    for name, df in sheets.items():
+        vendor, r = get_rule_by_sheet(name) if mode == "自動偵測" else (mode, RULES[mode])
+        
+        st.subheader(f"📄 分頁：{name} (廠商識別：{vendor})")
+        if r:
+            res = audit_logic(df, r)
+            for e in res["err"]: st.error(e)
+            if not res["err"]: st.success("🎉 初步審核符合合約規範")
+            with st.expander("查看判讀細節"):
+                for i in res["info"]: st.write(i)
+        else:
+            st.warning("⚠️ 此分頁名稱不含指定關鍵字，跳過自動審核。")
