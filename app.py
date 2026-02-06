@@ -2,110 +2,94 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="康橋菜單精準定位系統", layout="wide")
+st.set_page_config(page_title="康橋菜單合約全功能稽核系統", layout="wide")
 
-# --- 合約規則設定 ---
-RULES = {
+# --- 合約詳細規範資料庫 ---
+CONTRACT_RULES = {
     "新北食品": {
-        "keywords": ["小學菜單", "幼兒餐菜單", "美食街素食菜單", "美食街"],
-        "fish_specs": ["現撈小卷", "無刺白帶魚", "鬼頭刀", "白蝦", "淡菜", "水鯊", "帶皮鯰魚"],
-        "fried_limit": 1,
-        "spicy_days": ["週一", "週二", "週四"]
+        "fish_specs": {
+            "現撈小卷": r"小卷.*(80|100)\s?[gG克]",
+            "無刺白帶魚": r"白帶魚.*(120|150)\s?[gG克]",
+            "帶皮鯰魚": r"鯰魚.*120\s?[gG克]",
+            "手作獅子頭": r"獅子頭.*60\s?[gG克]",
+            "手作漢堡排": r"漢堡排.*150\s?[gG克]",
+            "手作烤肉串": r"烤肉串.*80\s?[gG克]",
+            "水鯊魚丁": r"水鯊.*(100|250)\s?[gG克]"
+        },
+        "spicy_days": ["週一", "週二", "週四"],
+        "fried_limit": 1
     },
     "暖禾輕食": {
-        "keywords": ["輕食", "菜單"],
-        "fish_specs": ["鮭魚", "鯖魚", "鱸魚", "蝦仁", "小卷"],
+        "spicy_days": ["週一", "週二", "週四"],
         "fried_limit": 1,
-        "spicy_days": ["週一", "週二", "週四"]
+        "forbidden_keywords": ["可樂", "汽水", "含糖飲料", "油炸超過"]
     }
 }
 
-def parse_date_and_weekday(cell_value):
-    """
-    精準拆解日期與星期。例如：將 '3/31 週二' 拆成 ('3/31', '週二')
-    """
-    text = str(cell_value).strip().replace("\n", " ")
-    # 找「週幾」
-    weekday_match = re.search(r"週[一二三四五]", text)
-    # 找「日期」(數字/數字)
-    date_match = re.search(r"\d{1,2}/\d{1,2}", text)
+def audit_day(df_col, weekday, date_str, rule, vendor):
+    violations = []
+    dish_list = [str(d).strip() for d in df_col if str(d).strip() and "週" not in str(d)]
     
-    weekday = weekday_match.group() if weekday_match else ""
-    date_val = date_match.group() if date_match else text.replace(weekday, "").strip()
-    
-    return date_val, weekday
+    # 1. 食材重複性檢查 (當日不重複原則)
+    seen_ingredients = {}
+    for dish in dish_list:
+        core_name = re.sub(r"[◎🌶️●△() \d gG克/]", "", dish)
+        if len(core_name) >= 2:
+            key = core_name[:2] # 取前兩個字當核心食材識別
+            if key in seen_ingredients:
+                violations.append({"日期": date_str, "週幾": weekday, "項目": dish, "異常": f"❌ 食材重複：與「{seen_ingredients[key]}」食材雷同"})
+            seen_ingredients[key] = dish
 
-def audit_logic(df, rule):
-    df = df.fillna("").astype(str)
-    violations = [] 
-    
-    # 1. 搜尋含有「週」字眼的基準列
-    day_row_idx = None
-    for i, row in df.iterrows():
-        if any("週" in str(cell) for cell in row):
-            day_row_idx = i
-            break
-            
-    if day_row_idx is None:
-        return None
+        # 2. 禁辣檢查
+        if weekday in rule["spicy_days"] and ("🌶️" in dish or "●" in dish):
+            violations.append({"日期": date_str, "週幾": weekday, "項目": dish, "異常": "🚫 禁辣日提供辣味"})
 
-    # 2. 垂直掃描
-    for col_idx in range(len(df.columns)):
-        cell_content = df.iloc[day_row_idx, col_idx]
-        date_str, weekday_str = parse_date_and_weekday(cell_content)
-        
-        # 只要有找到星期，就開始掃描該欄位
-        if weekday_str:
-            column_data = df.iloc[:, col_idx].tolist()
-            for row_idx, dish_name in enumerate(column_data):
-                dish_clean = dish_name.strip().replace("\n", " ")
-                if not dish_clean or row_idx == day_row_idx: continue
+        # 3. 規格與克重稽核 (新北食品增補協議專屬)
+        if vendor == "新北食品":
+            for spec, pattern in rule["fish_specs"].items():
+                if spec in dish:
+                    if not re.search(pattern, dish):
+                        violations.append({"日期": date_str, "週幾": weekday, "項目": dish, "異常": f"⚠️ 規格缺失：未標註或克重不符合約要求"})
 
-                # A. 禁辣檢查
-                if any(d in weekday_str for d in rule["spicy_days"]):
-                    if "🌶️" in dish_clean or "●" in dish_clean:
-                        violations.append({
-                            "日期": date_str,
-                            "週幾": weekday_str,
-                            "異常餐點名稱": dish_clean,
-                            "異常問題": "🚫 禁辣日提供辣味標示"
-                        })
+    # 4. 整日油炸次數檢查
+    total_fried = "".join(dish_list).count("◎")
+    if total_fried > rule["fried_limit"]:
+        violations.append({"日期": date_str, "週幾": weekday, "項目": "當日統計", "異常": f"🍟 油炸次數 ({total_fried}) 超標"})
 
-                # B. 油炸檢查
-                if dish_clean.count("◎") > rule["fried_limit"]:
-                    violations.append({
-                        "日期": date_str,
-                        "週幾": weekday_str,
-                        "異常餐點名稱": dish_clean,
-                        "異常問題": f"🍟 油炸標示超過 {rule['fried_limit']} 次"
-                    })
     return violations
 
-# --- 網頁主程式 ---
-st.title("🍱 康橋菜單精準定位系統")
+# --- 主程式 ---
+st.title("🛡️ 康橋菜單合約合規稽核系統")
+st.info("系統已根據 SE1140316、SE1140803、SE1141205 三份合約條款設定審核條件。")
 
-up = st.file_uploader("👉 請上傳 Excel 菜單", type=["xlsx"])
+up = st.file_uploader("請上傳 Excel 菜單", type=["xlsx"])
 
 if up:
     is_light = "輕食" in up.name
-    try:
-        excel = pd.ExcelFile(up)
-        for sheet in excel.sheet_names:
-            vendor = "暖禾輕食" if is_light or any(k in sheet for k in RULES["暖禾輕食"]["keywords"]) else "新北食品"
-            rule = RULES[vendor]
-            df = pd.read_excel(up, sheet_name=sheet, header=None)
-            
-            st.subheader(f"📊 審核分頁：{sheet} ({vendor}模式)")
-            
-            results = audit_logic(df, rule)
-            
-            if results is None:
-                st.warning("⚠️ 找不到日期標記，請確認分頁格式是否正確。")
-            elif results:
-                st.error(f"🚩 偵測到 {len(results)} 項異常：")
-                st.table(pd.DataFrame(results)) # 顯示您要求的四個欄位
-            else:
-                st.success("🎉 審核通過，未發現異常。")
-            st.divider()
-    except Exception as e:
-        st.error(f"系統故障：{e}")
+    excel = pd.ExcelFile(up)
+    for sheet in excel.sheet_names:
+        # 廠商判定
+        vendor = "暖禾輕食" if (is_light or "輕食" in sheet) else "新北食品"
+        rule = CONTRACT_RULES[vendor]
+        df = pd.read_excel(up, sheet_name=sheet, header=None)
+        
+        # 定位基準日期列
+        day_row = next((i for i, r in df.iterrows() if any("週" in str(c) for c in r)), None)
+        if day_row is None: continue
+
+        st.subheader(f"📑 稽核對象：{sheet} (適用規則：{vendor})")
+        all_results = []
+        for col in range(len(df.columns)):
+            header = str(df.iloc[day_row, col])
+            weekday_m = re.search(r"週[一二三四五]", header)
+            if weekday_m:
+                date_m = re.search(r"\d{1,2}/\d{1,2}", header)
+                v = audit_day(df.iloc[:, col], weekday_m.group(), date_m.group() if date_m else "", rule, vendor)
+                all_results.extend(v)
+
+        if all_results:
+            st.error(f"發現 {len(all_results)} 項不符規範項目：")
+            st.table(pd.DataFrame(all_results)[["日期", "週幾", "項目", "異常"]])
+        else:
+            st.success("🎉 經深度稽核，本分頁完全符合合約規範條件。")
+        st.divider()
