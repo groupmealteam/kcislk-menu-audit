@@ -5,97 +5,76 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
-# --- 嚴格執行校內菜單審閱原則 ---
-# 原則四：禁辣標示與禁辣日限制 
-SPICY_DAYS = ["週一", "週二", "週四"] 
-# 顏色定義
-RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid") # 禁辣/標示異常
-YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid") # 原則九：食材重複 
+st.set_page_config(page_title="林口康橋菜單終極稽核", layout="wide")
 
-def clean_cn(text):
-    """只抓中文，排除英文翻譯與過敏原符號，精準判定主料"""
-    if pd.isna(text): return ""
+# 原則標註顏色
+RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid") # 原則四
+YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid") # 原則九
+
+def clean_pure_dish_name(text):
+    """移除日期、符號，僅保留核心菜名"""
+    if pd.isna(text) or re.search(r"\d{2,4}", str(text)): return ""
     return "".join(re.findall(r'[\u4e00-\u9fa5]+', str(text)))
 
-def audit_and_export(uploaded_file):
+def run_final_audit(uploaded_file):
     wb = load_workbook(uploaded_file)
-    # 讀取所有分頁進行比對
     all_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None)
     output = BytesIO()
-    audit_results = []
+    final_logs = []
 
     for sheet_name, df in all_sheets.items():
         df = df.fillna("")
         ws = wb[sheet_name]
         
-        # 1. 搜尋日期行 (精準定位)
-        date_row = None
-        for i, row in df.iterrows():
-            if any(re.search(r"2026-\d{2}-\d{2}", str(c)) for c in row):
-                date_row = i
-                break
+        # 1. 定位日期行與主要餐點行 (Column B 必須含「主食/副菜」)
+        target_rows = [i for i, row in df.iterrows() if any(k in str(row[1]) for k in ["主食", "副菜", "主菜"])]
+        date_row = next((i for i, row in df.iterrows() if any(re.search(r"\d{1,2}/\d{1,2}", str(c)) for c in row)), None)
         
-        if date_row is None: continue
+        if date_row is None or not target_rows: continue
 
-        # 2. 鎖定「主食」與「副菜」列 (避免抓到下方的成分明細雜訊)
-        # 根據定稿原則二：主副菜須整體判斷 [cite: 24]
-        target_rows = []
-        for i, row in df.iterrows():
-            if any(k in str(row[1]) for k in ["主食", "副菜", "主菜"]):
-                target_rows.append(i)
-
-        # 3. 逐日(逐欄)深度檢核
+        # 2. 逐欄 (日期) 審核
         for col in range(2, len(df.columns)):
-            date_cell = str(df.iloc[date_row, col])
-            day_cell = str(df.iloc[date_row+1, col]) if (date_row+1) < len(df) else ""
+            date_val = str(df.iloc[date_row, col])
+            day_val = str(df.iloc[date_row+1, col]) if (date_row+1) < len(df) else ""
+            if not re.search(r"\d{1,2}/\d{1,2}", date_val): continue
             
-            # 僅處理有日期的欄位
-            if not re.search(r"\d{2}-\d{2}", date_cell): continue
+            # 原則四：禁辣日判定
+            is_restricted = any(d in day_val for d in ["週一", "週二", "週四"])
             
-            # 判定禁辣日 
-            is_restricted = any(d in day_cell for d in SPICY_DAYS)
-            
-            seen_main_ingredients = {} # 用於判斷同日重複 
-
+            seen_today = {}
             for r_idx in target_rows:
                 cell_val = str(df.iloc[r_idx, col]).strip()
-                if not cell_val or any(ex in cell_val for ex in ["季節", "時令", "履歷"]): continue
+                if not cell_val or len(cell_val) < 2: continue
 
-                # --- 執行原則四：禁辣日違規檢查 ---
+                # 判定：禁辣違規 (標紅)
                 if is_restricted and ("●" in cell_val or "🌶️" in cell_val):
                     ws.cell(row=r_idx+1, column=col+1).fill = RED_FILL
-                    audit_results.append({"日期": date_cell, "餐點": cell_val, "異常原因": "🚫 原則四：禁辣日(一二四)不得提供●或辣味餐點"})
+                    final_logs.append({"日期": date_val, "項目": cell_val, "異常": "🚫 禁辣日違規 (原則四)"})
 
-                # --- 執行原則九：品項重複檢查 ---
-                core = clean_cn(cell_val)[:2] # 抓取前兩個中文字作為核心主料
-                if len(core) >= 2:
-                    if core in seen_main_ingredients:
-                        # 標註重複
+                # 判定：同日食材重複 (標黃)
+                dish_core = clean_pure_dish_name(cell_val)[:2]
+                if len(dish_core) >= 2:
+                    if dish_core in seen_today:
                         ws.cell(row=r_idx+1, column=col+1).fill = YELLOW_FILL
-                        prev_r = seen_main_ingredients[core]
+                        prev_r = seen_today[dish_core]
                         ws.cell(row=prev_r+1, column=col+1).fill = YELLOW_FILL
-                        audit_results.append({"日期": date_cell, "餐點": cell_val, "異常原因": f"❌ 原則九：食材「{core}」與同日其他餐點重複"})
-                    seen_main_ingredients[core] = r_idx
+                        final_logs.append({"日期": date_val, "項目": cell_val, "異常": f"❌ 食材重複: {dish_core} (原則九)"})
+                    seen_today[dish_core] = r_idx
 
     wb.save(output)
-    return audit_results, output.getvalue()
+    return final_logs, output.getvalue()
 
 # --- 介面 ---
-st.title("🛡️ 林口康橋菜單審核回傳系統")
-st.info("系統將依據《校內菜單審閱原則》產出標註異常的 Excel 檔案。")
+st.title("🛡️ 林口康橋菜單審核 (回傳檔案專用版)")
+st.warning("本版本已排除日期重複、週一重複等雜訊，僅標註真正的原則違規項目。")
 
-up = st.file_uploader("👉 請上傳原始菜單 (.xlsx)", type=["xlsx"])
+up = st.file_uploader("👉 請上傳原始菜單 (xlsx)", type=["xlsx"])
 
 if up:
-    results, excel_data = audit_and_export(up)
-    if results:
-        st.error(f"🚩 偵測到 {len(results)} 項不符合原則之項目：")
-        st.download_button(
-            label="📥 下載審核標註檔 (回傳廠商修正)",
-            data=excel_data,
-            file_name=f"審核結果_{up.name}",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        st.table(pd.DataFrame(results))
+    logs, file_bytes = run_final_audit(up)
+    if logs:
+        st.error(f"🚩 發現 {len(logs)} 項實質違規，請務必下載下方檔案：")
+        st.download_button("📥 下載審核標註檔 (回傳廠商用)", file_bytes, f"審核建議_{up.name}", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.table(pd.DataFrame(logs))
     else:
-        st.success("🎉 審核完成，未發現異常項目。")
+        st.success("🎉 本份菜單符合原則。")
