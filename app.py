@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="康橋菜單合約精準定位系統", layout="wide")
+st.set_page_config(page_title="康橋菜單精準定位系統", layout="wide")
 
-# --- 合約資料庫設定 ---
+# --- 合約規則設定 ---
 RULES = {
     "新北食品": {
         "keywords": ["小學菜單", "幼兒餐菜單", "美食街素食菜單", "美食街"],
@@ -20,106 +20,92 @@ RULES = {
     }
 }
 
+def parse_date_and_weekday(cell_value):
+    """
+    精準拆解日期與星期。例如：將 '3/31 週二' 拆成 ('3/31', '週二')
+    """
+    text = str(cell_value).strip().replace("\n", " ")
+    # 找「週幾」
+    weekday_match = re.search(r"週[一二三四五]", text)
+    # 找「日期」(數字/數字)
+    date_match = re.search(r"\d{1,2}/\d{1,2}", text)
+    
+    weekday = weekday_match.group() if weekday_match else ""
+    date_val = date_match.group() if date_match else text.replace(weekday, "").strip()
+    
+    return date_val, weekday
+
 def audit_logic(df, rule):
     df = df.fillna("").astype(str)
     violations = [] 
     
-    # 1. 定位日期列 (基準列)
-    day_row_idx = next((i for i, r in df.iterrows() if any("週" in str(cell) for cell in r)), None)
+    # 1. 搜尋含有「週」字眼的基準列
+    day_row_idx = None
+    for i, row in df.iterrows():
+        if any("週" in str(cell) for cell in row):
+            day_row_idx = i
+            break
+            
     if day_row_idx is None:
-        return None, "❌ 找不到日期標記列（週一至週五）。"
+        return None
 
-    header_cells = df.iloc[day_row_idx].tolist()
-    
-    for col_idx, cell_value in enumerate(header_cells):
-        full_date_str = str(cell_value).strip().replace("\n", " ")
-        # 提取日期 (如 3/31) 與 週幾 (如 週二)
-        match_day = re.search(r"週[一二三四五]", full_date_str)
-        if match_day:
-            day_of_week = match_day.group()
-            # 嘗試抓取日期部分 (例如 3/31)
-            date_part = full_date_str.replace(day_of_week, "").strip()
-            
+    # 2. 垂直掃描
+    for col_idx in range(len(df.columns)):
+        cell_content = df.iloc[day_row_idx, col_idx]
+        date_str, weekday_str = parse_date_and_weekday(cell_content)
+        
+        # 只要有找到星期，就開始掃描該欄位
+        if weekday_str:
             column_data = df.iloc[:, col_idx].tolist()
-            
-            # --- 垂直掃描每一道菜 ---
             for row_idx, dish_name in enumerate(column_data):
                 dish_clean = dish_name.strip().replace("\n", " ")
-                if not dish_clean or row_idx == day_row_idx:
-                    continue
+                if not dish_clean or row_idx == day_row_idx: continue
 
-                # ⚠️ 判讀 A：禁辣違規 (定位到菜名)
-                if any(d in day_of_week for d in rule["spicy_days"]):
+                # A. 禁辣檢查
+                if any(d in weekday_str for d in rule["spicy_days"]):
                     if "🌶️" in dish_clean or "●" in dish_clean:
                         violations.append({
-                            "日期": date_part,
-                            "週幾": day_of_week,
+                            "日期": date_str,
+                            "週幾": weekday_str,
                             "異常餐點名稱": dish_clean,
                             "異常問題": "🚫 禁辣日提供辣味標示"
                         })
 
-                # ⚠️ 判讀 B：油炸超標 (單道菜偵測)
+                # B. 油炸檢查
                 if dish_clean.count("◎") > rule["fried_limit"]:
                     violations.append({
-                        "日期": date_part,
-                        "週幾": day_of_week,
+                        "日期": date_str,
+                        "週幾": weekday_str,
                         "異常餐點名稱": dish_clean,
-                        "異常問題": f"🍟 單品油炸標示超過 {rule['fried_limit']} 次"
+                        "異常問題": f"🍟 油炸標示超過 {rule['fried_limit']} 次"
                     })
-
-            # ⚠️ 判讀 C：當日全天油炸統計
-            all_col_text = "".join(column_data)
-            total_f_count = all_col_text.count("◎")
-            if total_f_count > rule["fried_limit"] + 1: # 假設全天總量寬限度
-                violations.append({
-                    "日期": date_part,
-                    "週幾": day_of_week,
-                    "異常餐點名稱": "--- 當日整欄統計 ---",
-                    "異常問題": f"⚠️ 全天油炸共 {total_f_count} 次，疑超標"
-                })
-
     return violations
 
 # --- 網頁主程式 ---
-st.title("🍱 康橋菜單合約異常精準定位系統")
+st.title("🍱 康橋菜單精準定位系統")
 
-up = st.file_uploader("👉 請上傳您的 Excel 菜單", type=["xlsx"])
+up = st.file_uploader("👉 請上傳 Excel 菜單", type=["xlsx"])
 
 if up:
-    file_name = up.name
-    is_light_file = "輕食" in file_name
-    
+    is_light = "輕食" in up.name
     try:
         excel = pd.ExcelFile(up)
-        for sheet_name in excel.sheet_names:
-            # 識別廠商
-            if is_light_file:
-                vendor = "暖禾輕食"
-            else:
-                if any(k in sheet_name for k in RULES["暖禾輕食"]["keywords"]):
-                    vendor = "暖禾輕食"
-                elif any(k in sheet_name for k in RULES["新北食品"]["keywords"]):
-                    vendor = "新北食品"
-                else:
-                    vendor = "新北食品"
-
+        for sheet in excel.sheet_names:
+            vendor = "暖禾輕食" if is_light or any(k in sheet for k in RULES["暖禾輕食"]["keywords"]) else "新北食品"
             rule = RULES[vendor]
-            df = pd.read_excel(up, sheet_name=sheet_name, header=None)
+            df = pd.read_excel(up, sheet_name=sheet, header=None)
             
-            st.subheader(f"📊 審核分頁：{sheet_name} (規則：{vendor})")
+            st.subheader(f"📊 審核分頁：{sheet} ({vendor}模式)")
             
-            violations = audit_logic(df, rule)
+            results = audit_logic(df, rule)
             
-            if violations is None:
-                st.warning("❌ 格式異常，無法定位日期。")
-            elif violations:
-                st.error(f"🚩 發現 {len(violations)} 項異常，請要求廠商修改：")
-                # --- 這是您要求的優化表格格式 ---
-                err_df = pd.DataFrame(violations)
-                st.table(err_df[["日期", "週幾", "異常餐點名稱", "異常問題"]])
+            if results is None:
+                st.warning("⚠️ 找不到日期標記，請確認分頁格式是否正確。")
+            elif results:
+                st.error(f"🚩 偵測到 {len(results)} 項異常：")
+                st.table(pd.DataFrame(results)) # 顯示您要求的四個欄位
             else:
-                st.success("🎉 本頁初步審核符合合約規範。")
+                st.success("🎉 審核通過，未發現異常。")
             st.divider()
-
     except Exception as e:
-        st.error(f"系統錯誤：{e}")
+        st.error(f"系統故障：{e}")
